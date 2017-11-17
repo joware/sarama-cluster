@@ -166,6 +166,47 @@ func (c *Consumer) Subscriptions() map[string][]int32 {
 	return c.subs.Info()
 }
 
+// ResetPartitionOffset resets offset of partition
+func (c *Consumer) ResetPartitionOffset(topic string, partition int32, offset int64, metadata string) error {
+	c.commitMu.Lock()
+	defer c.commitMu.Unlock()
+
+	req := &sarama.OffsetCommitRequest{
+		Version:                 2,
+		ConsumerGroup:           c.groupID,
+		ConsumerGroupGeneration: c.generationID,
+		ConsumerID:              c.memberID,
+		RetentionTime:           -1,
+	}
+	if ns := c.client.config.Consumer.Offsets.Retention; ns != 0 {
+		req.RetentionTime = int64(ns / time.Millisecond)
+	}
+	req.AddBlock(topic, partition, offset, 0, metadata)
+
+	c.client.RefreshMetadata(topic)
+	c.client.RefreshCoordinator(c.groupID)
+	broker, err := c.client.Coordinator(c.groupID)
+	if err != nil {
+		c.closeCoordinator(broker, err)
+		return err
+	}
+
+	resp, err := broker.CommitOffset(req)
+	if err != nil {
+		c.closeCoordinator(broker, err)
+		return err
+	}
+
+	for _, errs := range resp.Errors {
+		for _, kerr := range errs {
+			if kerr != sarama.ErrNoError {
+				err = kerr
+			}
+		}
+	}
+	return err
+}
+
 // CommitOffsets allows to manually commit previously marked offsets. By default there is no
 // need to call this function as the consumer will commit offsets automatically
 // using the Config.Consumer.Offsets.CommitInterval setting.
